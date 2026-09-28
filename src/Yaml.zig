@@ -89,7 +89,7 @@ pub fn parse(self: Yaml, arena: Allocator, comptime T: type) Error!T {
     }
 }
 
-fn parseValue(self: Yaml, arena: Allocator, comptime T: type, value: Value) Error!T {
+pub fn parseValue(self: Yaml, arena: Allocator, comptime T: type, value: Value) Error!T {
     return switch (@typeInfo(T)) {
         .int => self.parseInt(T, value),
         .bool => self.parseBoolean(bool, value),
