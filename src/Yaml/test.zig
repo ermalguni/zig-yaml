@@ -973,3 +973,74 @@ test "parse struct as list of structs" {
     const parsed = try yaml.parse(arena.allocator(), Struct);
     try testing.expectEqualDeep(Struct{ .a = 1 }, parsed);
 }
+
+test "unsupported YAML references and merge keys" {
+    const cases = [_]struct {
+        source: []const u8,
+        expected: anyerror,
+    }{
+        .{
+            .source = "image: &image nginx:alpine\n",
+            .expected = error.UnsupportedAnchor,
+        },
+        .{
+            .source = "command: [*command]\n",
+            .expected = error.UnsupportedAlias,
+        },
+        .{
+            .source = "first: value\n&key second: value\n",
+            .expected = error.UnsupportedAnchor,
+        },
+        .{
+            .source = "first: value\n*key: value\n",
+            .expected = error.UnsupportedAlias,
+        },
+        .{
+            .source = "service:\n  <<:\n    image: nginx:alpine\n",
+            .expected = error.UnsupportedMergeKey,
+        },
+    };
+
+    for (cases) |case| {
+        var yaml: Yaml = .{ .source = case.source };
+        defer yaml.deinit(testing.allocator);
+
+        try testing.expectError(
+            case.expected,
+            yaml.load(testing.allocator),
+        );
+    }
+}
+
+test "reference punctuation remains scalar content" {
+    const source =
+        \\# &anchor *alias <<:
+        \\anchor: "&literal"
+        \\alias: '*literal'
+        \\merge: <<
+        \\command: echo &literal *literal
+    ;
+
+    var yaml: Yaml = .{ .source = source };
+    defer yaml.deinit(testing.allocator);
+    try yaml.load(testing.allocator);
+
+    const map = yaml.docs.items[0].map;
+
+    try testing.expectEqualStrings(
+        "&literal",
+        map.get("anchor").?.scalar,
+    );
+    try testing.expectEqualStrings(
+        "*literal",
+        map.get("alias").?.scalar,
+    );
+    try testing.expectEqualStrings(
+        "<<",
+        map.get("merge").?.scalar,
+    );
+    try testing.expectEqualStrings(
+        "echo &literal *literal",
+        map.get("command").?.scalar,
+    );
+}

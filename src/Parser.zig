@@ -168,6 +168,8 @@ fn value(self: *Parser, gpa: Allocator) ParseError!Node.OptionalIndex {
             self.token_it.seekBy(-1);
             return self.listBracketed(gpa);
         },
+        .alias => return ParseError.UnsupportedAlias,
+        .anchor => return ParseError.UnsupportedAnchor,
         else => return .none,
     }
 }
@@ -277,6 +279,8 @@ fn map(self: *Parser, gpa: Allocator) ParseError!Node.OptionalIndex {
             .flow_map_end => {
                 break;
             },
+            .anchor => return error.UnsupportedAnchor,
+            .alias => return error.UnsupportedAlias,
             else => return self.fail(gpa, self.token_it.pos, "unexpected token for 'key': {}", .{key}),
         }
 
@@ -285,6 +289,9 @@ fn map(self: *Parser, gpa: Allocator) ParseError!Node.OptionalIndex {
         // Separator
         _ = self.expectToken(.map_value_ind, &.{ .new_line, .comment }) catch
             return self.fail(gpa, self.token_it.pos, "expected map separator ':'", .{});
+
+        if (mem.eql(u8, self.rawString(key_pos, key_pos), "<<"))
+            return error.UnsupportedMergeKey;
 
         // Parse value
         const value_index = try self.value(gpa);
@@ -534,12 +541,12 @@ fn leafValue(self: *Parser, gpa: Allocator) ParseError!Node.OptionalIndex {
 
                 return node_index.toOptional();
             },
-            .literal => {},
+            .literal, .anchor, .alias => {},
             .space => {
                 const trailing = @intFromEnum(self.token_it.pos) - 2;
-                self.eatCommentsAndSpace(&.{});
+                self.eatCommentsAndSpace(&.{.new_line});
                 if (self.token_it.peek()) |peek| {
-                    if (peek.id != .literal) {
+                    if (peek.id != .literal and peek.id != .anchor and peek.id != .alias) {
                         const node_end: Token.Index = @enumFromInt(trailing);
                         log.debug("(leaf) {s}", .{self.rawString(node_start, node_end)});
                         self.nodes.set(@intFromEnum(node_index), .{
@@ -793,6 +800,9 @@ pub const ParseError = error{
     UnexpectedEof,
     UnexpectedToken,
     ParseFailure,
+    UnsupportedAnchor,
+    UnsupportedAlias,
+    UnsupportedMergeKey,
 } || Allocator.Error;
 
 test {
