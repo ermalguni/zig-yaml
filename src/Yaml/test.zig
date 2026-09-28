@@ -1044,3 +1044,61 @@ test "reference punctuation remains scalar content" {
         map.get("command").?.scalar,
     );
 }
+
+test "block scalar preserves interpolation braces" {
+    var document: Yaml = .{
+        .source = "image: nginx:${TAG}\ncommand: [echo, hello]\n",
+    };
+    defer document.deinit(testing.allocator);
+    try document.load(testing.allocator);
+
+    const map = document.docs.items[0].map;
+    try testing.expectEqualStrings(
+        "nginx:${TAG}",
+        map.get("image").?.scalar,
+    );
+
+    const command = map.get("command").?.list;
+    try testing.expectEqual(@as(usize, 2), command.len);
+    try testing.expectEqualStrings("hello", command[1].scalar);
+}
+
+test "empty mapping values preserve sibling and ancestor keys" {
+    const source =
+        \\outer:
+        \\  first:
+        \\  second: value
+        \\  last:
+        \\items:
+        \\- one
+        \\- two
+        \\next: sibling
+    ;
+
+    var document: Yaml = .{ .source = source };
+    defer document.deinit(testing.allocator);
+    try document.load(testing.allocator);
+
+    const root = document.docs.items[0].map;
+    const outer = root.get("outer").?.map;
+
+    try testing.expect(outer.get("first").? == .empty);
+    try testing.expectEqualStrings("value", outer.get("second").?.scalar);
+    try testing.expect(outer.get("last").? == .empty);
+    try testing.expectEqualStrings("sibling", root.get("next").?.scalar);
+
+    const items = root.get("items").?.list;
+    try testing.expectEqual(@as(usize, 2), items.len);
+    try testing.expectEqualStrings("one", items[0].scalar);
+    try testing.expectEqualStrings("two", items[1].scalar);
+}
+
+test "unindented scalar is not a mapping value" {
+    var document: Yaml = .{ .source = "a:\nb\n" };
+    defer document.deinit(testing.allocator);
+
+    try testing.expectError(
+        error.ParseFailure,
+        document.load(testing.allocator),
+    );
+}

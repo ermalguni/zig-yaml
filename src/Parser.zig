@@ -294,8 +294,21 @@ fn map(self: *Parser, gpa: Allocator) ParseError!Node.OptionalIndex {
             return error.UnsupportedMergeKey;
 
         // Parse value
-        const value_index = try self.value(gpa);
+        self.eatCommentsAndSpace(&.{});
+        const next_pos = self.token_it.pos;
+        const next = self.token_it.peek() orelse return error.UnexpectedEof;
+        const key_loc = self.tokens.items(.line_col)[@intFromEnum(key_pos)];
+        const next_loc = self.tokens.items(.line_col)[@intFromEnum(next_pos)];
 
+        const boundary = next.id == .eof or
+            next.id == .doc_start or
+            next.id == .doc_end or
+            (next_loc.line > key_loc.line and
+                (next_loc.col < key_loc.col or
+                    (next_loc.col == key_loc.col and next.id != .seq_item_ind)));
+
+        const value_index: Node.OptionalIndex =
+            if (boundary) .none else try self.value(gpa);
         if (value_index.unwrap()) |v| {
             const value_start = self.nodes.items(.scope)[@intFromEnum(v)].start;
             if (self.getCol(value_start) < self.getCol(key_pos)) {

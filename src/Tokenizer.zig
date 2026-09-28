@@ -285,7 +285,7 @@ pub fn next(self: *Tokenizer) Token {
             },
 
             .literal => switch (c) {
-                '\r', '\n', ' ', '\'', '"', ']', '}' => {
+                '\r', '\n', ' ', '\'', '"' => {
                     result.id = .literal;
                     break;
                 },
@@ -438,7 +438,7 @@ test "mappings" {
 
 test "inline mapped sequence of values" {
     try testExpected(
-        \\key :  [ val1, 
+        \\key :  [ val1,
         \\          val2 ]
     , &[_]Token.Id{
         .literal,
