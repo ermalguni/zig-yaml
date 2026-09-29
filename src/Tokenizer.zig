@@ -146,9 +146,11 @@ pub fn next(self: *Tokenizer) Token {
                     result.id = .seq_item_ind;
                     self.index += "- ".len;
                     break;
-                } else if (self.matchesPattern("-\n")) {
+                } else if (self.matchesPattern("-\n") or self.matchesPattern("-\r") or
+                    self.index + 1 == self.buffer.len)
+                {
                     result.id = .seq_item_ind;
-                    // we do not skip the newline
+                    // Leave separating whitespace for the next token.
                     self.index += "-".len;
                     break;
                 } else {
@@ -289,7 +291,7 @@ pub fn next(self: *Tokenizer) Token {
                     result.id = .literal;
                     break;
                 },
-                ',', '[', '{' => {
+                ',', '[', ']', '{', '}' => {
                     result.id = .literal;
                     if (self.in_flow > 0) {
                         break;
@@ -297,7 +299,9 @@ pub fn next(self: *Tokenizer) Token {
                 },
                 ':' => {
                     result.id = .literal;
-                    if (self.matchesPattern(": ") or self.matchesPattern(":\n") or self.matchesPattern(":\r")) {
+                    if (self.matchesPattern(": ") or self.matchesPattern(":\n") or
+                        self.matchesPattern(":\r") or self.index + 1 == self.buffer.len)
+                    {
                         break;
                     }
                 },
@@ -437,10 +441,7 @@ test "mappings" {
 }
 
 test "inline mapped sequence of values" {
-    try testExpected(
-        \\key :  [ val1,
-        \\          val2 ]
-    , &[_]Token.Id{
+    try testExpected("key :  [ val1, \n          val2 ]", &[_]Token.Id{
         .literal,
         .space,
         .map_value_ind,

@@ -90,6 +90,10 @@ pub fn parse(self: Yaml, arena: Allocator, comptime T: type) Error!T {
 }
 
 pub fn parseValue(self: Yaml, arena: Allocator, comptime T: type, value: Value) Error!T {
+    if (value == .null and @typeInfo(T) != .optional) {
+        return error.TypeMismatch;
+    }
+
     return switch (@typeInfo(T)) {
         .int => self.parseInt(T, value),
         .bool => self.parseBoolean(bool, value),
@@ -110,7 +114,7 @@ pub fn parseValue(self: Yaml, arena: Allocator, comptime T: type, value: Value) 
         } else return error.TypeMismatch,
         .@"enum" => self.parseEnum(T, value),
         .void => error.TypeMismatch,
-        .optional => unreachable,
+        .optional => self.parseOptional(arena, T, value),
         else => error.Unimplemented,
     };
 }
@@ -172,8 +176,10 @@ fn parseUnion(self: Yaml, arena: Allocator, comptime T: type, value: Value) Erro
 
 fn parseOptional(self: Yaml, arena: Allocator, comptime T: type, value: ?Value) Error!T {
     const unwrapped = value orelse return null;
-    const opt_info = @typeInfo(T).optional;
-    return @as(T, try self.parseValue(arena, opt_info.child, unwrapped));
+    if (unwrapped == .null) return null;
+
+    const child = @typeInfo(T).optional.child;
+    return @as(T, try self.parseValue(arena, child, unwrapped));
 }
 
 fn parseStruct(self: Yaml, arena: Allocator, comptime T: type, map: Map) Error!T {
@@ -303,7 +309,6 @@ pub const YamlError = error{
     UnexpectedNodeType,
     DuplicateMapKey,
     OutOfMemory,
-    CannotEncodeValue,
 } || ParseError || std.fmt.ParseIntError;
 
 pub const StringifyError = error{
@@ -314,7 +319,7 @@ pub const List = []Value;
 pub const Map = std.StringArrayHashMapUnmanaged(Value);
 
 pub const Value = union(enum) {
-    empty,
+    null,
     scalar: []const u8,
     list: List,
     map: Map,
@@ -336,8 +341,15 @@ pub const Value = union(enum) {
                 }
                 map.deinit(gpa);
             },
-            .empty, .boolean => {},
+            .null, .boolean => {},
         }
+    }
+
+    fn isNullSpelling(raw: []const u8) bool {
+        return mem.eql(u8, raw, "null") or
+            mem.eql(u8, raw, "Null") or
+            mem.eql(u8, raw, "NULL") or
+            mem.eql(u8, raw, "~");
     }
 
     pub fn asScalar(self: Value) ?[]const u8 {
@@ -362,14 +374,22 @@ pub const Value = union(enum) {
 
     pub fn stringify(self: Value, writer: *std.Io.Writer, args: StringifyArgs) StringifyError!void {
         switch (self) {
-            .empty => return,
-            .scalar => |scalar| return writer.print("{s}", .{scalar}),
+            .null => return writer.writeAll("null"),
+            .scalar => |scalar| {
+                // Preserve strings that would otherwise resolve as null.
+                if (scalar.len == 0 or isNullSpelling(scalar)) {
+                    try writer.writeByte('"');
+                    try writer.writeAll(scalar);
+                    try writer.writeByte('"');
+                    return;
+                }
+                return writer.writeAll(scalar);
+            },
             .list => |list| {
                 const len = list.len;
                 if (len == 0) return;
 
-                const first = list[0];
-                if (first.isCompound()) {
+                if (listNeedsBlockStyle(list)) {
                     for (list, 0..) |elem, i| {
                         const indentation = try writer.writableSlice(args.indentation);
                         @memset(indentation, ' ');
@@ -408,7 +428,7 @@ pub const Value = union(enum) {
 
                     const should_inline = blk: {
                         if (!value.isCompound()) break :blk true;
-                        if (value == .list and value.list.len > 0 and !value.list[0].isCompound()) break :blk true;
+                        if (value == .list and value.list.len > 0 and !listNeedsBlockStyle(value.list)) break :blk true;
                         break :blk false;
                     };
 
@@ -432,6 +452,13 @@ pub const Value = union(enum) {
         }
     }
 
+    fn listNeedsBlockStyle(list: List) bool {
+        for (list) |value| {
+            if (value.isCompound()) return true;
+        }
+        return false;
+    }
+
     fn isCompound(self: Value) bool {
         return switch (self) {
             .list, .map => true,
@@ -443,11 +470,11 @@ pub const Value = union(enum) {
         const tag = tree.nodeTag(node_index);
         switch (tag) {
             .doc => {
-                const inner = tree.nodeData(node_index).maybe_node.unwrap() orelse return .empty;
+                const inner = tree.nodeData(node_index).maybe_node.unwrap() orelse return .null;
                 return Value.fromNode(gpa, tree, inner);
             },
             .doc_with_directive => {
-                const inner = tree.nodeData(node_index).doc_with_directive.maybe_node.unwrap() orelse return .empty;
+                const inner = tree.nodeData(node_index).doc_with_directive.maybe_node.unwrap() orelse return .null;
                 return Value.fromNode(gpa, tree, inner);
             },
             .map_single => {
@@ -468,7 +495,7 @@ pub const Value = union(enum) {
                 gop.value_ptr.* = if (entry.maybe_node.unwrap()) |value|
                     try Value.fromNode(gpa, tree, value)
                 else
-                    .empty;
+                    .null;
 
                 return Value{ .map = out_map };
             },
@@ -502,7 +529,7 @@ pub const Value = union(enum) {
                     gop.value_ptr.* = if (entry.data.maybe_node.unwrap()) |value|
                         try Value.fromNode(gpa, tree, value)
                     else
-                        .empty;
+                        .null;
                 }
 
                 return Value{ .map = out_map };
@@ -560,12 +587,14 @@ pub const Value = union(enum) {
             },
             .value => {
                 const raw = tree.nodeScope(node_index).rawString(tree);
+                if (isNullSpelling(raw)) return .null;
                 return Value{ .scalar = try gpa.dupe(u8, raw) };
             },
+            .empty_scalar => return .null,
         }
     }
 
-    pub fn encode(arena: Allocator, input: anytype) YamlError!?Value {
+    pub fn encode(arena: Allocator, input: anytype) YamlError!Value {
         switch (@typeInfo(@TypeOf(input))) {
             .comptime_int,
             .int,
@@ -578,9 +607,7 @@ pub const Value = union(enum) {
                 try list.ensureTotalCapacityPrecise(arena, info.fields.len);
 
                 inline for (info.fields) |field| {
-                    if (try encode(arena, @field(input, field.name))) |value| {
-                        list.appendAssumeCapacity(value);
-                    }
+                    list.appendAssumeCapacity(try encode(arena, @field(input, field.name)));
                 }
 
                 return Value{ .list = try list.toOwnedSlice(arena) };
@@ -589,10 +616,9 @@ pub const Value = union(enum) {
                 try map.ensureTotalCapacity(arena, info.fields.len);
 
                 inline for (info.fields) |field| {
-                    if (try encode(arena, @field(input, field.name))) |value| {
-                        const key = try arena.dupe(u8, field.name);
-                        map.putAssumeCapacityNoClobber(key, value);
-                    }
+                    const value = try encode(arena, @field(input, field.name));
+                    const key = try arena.dupe(u8, field.name);
+                    map.putAssumeCapacityNoClobber(key, value);
                 }
 
                 return Value{ .map = map };
@@ -615,7 +641,7 @@ pub const Value = union(enum) {
                         return encode(arena, @as(Slice, input));
                     },
                     else => {
-                        return encode(arena, input);
+                        return encode(arena, input.*);
                     },
                 },
                 .slice => {
@@ -627,12 +653,7 @@ pub const Value = union(enum) {
                     try list.ensureTotalCapacityPrecise(arena, input.len);
 
                     for (input) |elem| {
-                        if (try encode(arena, elem)) |value| {
-                            list.appendAssumeCapacity(value);
-                        } else {
-                            log.debug("Could not encode value in a list: {any}", .{elem});
-                            return error.CannotEncodeValue;
-                        }
+                        list.appendAssumeCapacity(try encode(arena, elem));
                     }
 
                     return Value{ .list = try list.toOwnedSlice(arena) };
@@ -642,11 +663,11 @@ pub const Value = union(enum) {
                 },
             },
 
-            // TODO we should probably have an option to encode `null` and also
-            // allow for some default value too.
-            .optional => return if (input) |val| encode(arena, val) else null,
-
-            .null => return null,
+            .optional => {
+                if (input) |value| return encode(arena, value);
+                return .null;
+            },
+            .null => return .null,
             .bool => return Value{ .boolean = input },
             .@"enum" => return Value{ .scalar = try arena.dupe(u8, @tagName(input)) },
 

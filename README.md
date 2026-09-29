@@ -47,6 +47,7 @@ The parser currently understands a few YAML primitives such as:
 - explicit documents (`---`, `...`)
 - mappings (`:`)
 - sequences (`-`, `[`, `]`)
+- null values (`null`, `Null`, `NULL`, `~`, and omitted block values)
 
 In fact, if you head over to `examples/` dir, you will find YAML examples that have been tested against this
 parser. You can also have a look at end-to-end test inputs in `test/` directory.
@@ -146,6 +147,37 @@ yaml.load(allocator) catch |err| switch (err) {
     else => return err,
 };
 ```
+
+### Null values
+
+Plain `null`, `Null`, `NULL`, and `~` resolve to `Yaml.Value.@"null"`.
+Omitted block mapping values (`key:`), empty block sequence items (`-`), and
+explicit empty documents also represent null. Quoted spellings and quoted empty
+strings remain strings. An empty input stream contains no documents.
+
+YAML null decodes into Zig optional types as `null`, including optional numbers,
+booleans, strings, enums, structs, arrays, slices, and pointers. Non-null values
+decode as the optional's child type. Null cannot decode into a non-optional type;
+parsing returns `error.TypeMismatch`.
+
+Missing struct fields use their declared defaults; an explicit or omitted YAML
+null overrides an optional default:
+
+```zig
+const Config = struct {
+    retries: ?u32 = 3,
+};
+// Missing `retries`: 3. `retries: null` or `retries:`: null.
+```
+
+Encoding Zig nulls preserves mapping fields and sequence positions. Serialization
+emits `null` and quotes null-looking strings so their types survive a round trip.
+Nested Zig optional states that encode as null cannot be distinguished in YAML;
+decoding a YAML null always produces the outer optional's null state.
+
+Version 0.3.5 replaces `Yaml.Value.empty` with `Yaml.Value.@"null"` and changes
+`Yaml.Value.encode` to return `YamlError!Value` instead of `YamlError!?Value`.
+Null struct fields are now emitted rather than omitted.
 
 ### Restrictions in YAML support
 

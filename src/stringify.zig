@@ -6,11 +6,6 @@ pub fn stringify(gpa: std.mem.Allocator, input: anytype, writer: *std.Io.Writer)
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
-    const maybe_value = try Yaml.Value.encode(arena.allocator(), input);
-
-    if (maybe_value) |value| {
-        // TODO should we output as an explicit doc?
-        // How can allow the user to specify?
-        try value.stringify(writer, .{});
-    }
+    const value = try Yaml.Value.encode(arena.allocator(), input);
+    try value.stringify(writer, .{});
 }

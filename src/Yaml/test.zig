@@ -753,17 +753,21 @@ test "stringify a struct with an optional" {
 
     try testStringify(
         \\a: 1
+        \\b: null
         \\c: 2.5
     , struct { a: i64, b: ?f64, c: f64 }{ .a = 1, .b = null, .c = 2.5 });
 }
 
 test "stringify a struct with all optionals" {
-    try testStringify("", struct { a: ?i64, b: ?f64 }{ .a = null, .b = null });
+    try testStringify(
+        \\a: null
+        \\b: null
+    , struct { a: ?i64, b: ?f64 }{ .a = null, .b = null });
 }
 
 test "stringify an optional" {
-    try testStringify("", null);
-    try testStringify("", @as(?u64, null));
+    try testStringify("null", null);
+    try testStringify("null", @as(?u64, null));
 }
 
 test "stringify a union" {
@@ -1082,9 +1086,9 @@ test "empty mapping values preserve sibling and ancestor keys" {
     const root = document.docs.items[0].map;
     const outer = root.get("outer").?.map;
 
-    try testing.expect(outer.get("first").? == .empty);
+    try testing.expect(outer.get("first").? == .null);
     try testing.expectEqualStrings("value", outer.get("second").?.scalar);
-    try testing.expect(outer.get("last").? == .empty);
+    try testing.expect(outer.get("last").? == .null);
     try testing.expectEqualStrings("sibling", root.get("next").?.scalar);
 
     const items = root.get("items").?.list;
@@ -1101,4 +1105,451 @@ test "unindented scalar is not a mapping value" {
         error.ParseFailure,
         document.load(testing.allocator),
     );
+}
+
+test "null spellings resolve at the root and in collections" {
+    for ([_][]const u8{ "null", "Null", "NULL", "~" }) |source| {
+        var yaml: Yaml = .{ .source = source };
+        defer yaml.deinit(testing.allocator);
+        try yaml.load(testing.allocator);
+        try testing.expectEqual(@as(usize, 1), yaml.docs.items.len);
+        try testing.expect(yaml.docs.items[0] == .null);
+        try testing.expectEqual(@as(?i32, null), try yaml.parse(testing.allocator, ?i32));
+    }
+
+    var yaml: Yaml = .{ .source =
+        \\lower: null
+        \\title: Null
+        \\upper: NULL
+        \\tilde: ~
+        \\list: [null, Null, NULL, ~]
+    };
+    defer yaml.deinit(testing.allocator);
+    try yaml.load(testing.allocator);
+    const map = yaml.docs.items[0].map;
+    for ([_][]const u8{ "lower", "title", "upper", "tilde" }) |key| {
+        try testing.expect(map.get(key).? == .null);
+    }
+    const list = map.get("list").?.list;
+    try testing.expectEqual(@as(usize, 4), list.len);
+    for (list) |item| try testing.expect(item == .null);
+}
+
+test "quoted null spellings empty strings and mixed case remain strings" {
+    const cases = [_]struct { source: []const u8, expected: []const u8 }{
+        .{ .source = "'null'", .expected = "null" },
+        .{ .source = "\"null\"", .expected = "null" },
+        .{ .source = "'Null'", .expected = "Null" },
+        .{ .source = "\"Null\"", .expected = "Null" },
+        .{ .source = "'NULL'", .expected = "NULL" },
+        .{ .source = "\"NULL\"", .expected = "NULL" },
+        .{ .source = "'~'", .expected = "~" },
+        .{ .source = "\"~\"", .expected = "~" },
+        .{ .source = "''", .expected = "" },
+        .{ .source = "\"\"", .expected = "" },
+        .{ .source = "nUlL", .expected = "nUlL" },
+        .{ .source = "nullish", .expected = "nullish" },
+    };
+    for (cases) |case| {
+        var yaml: Yaml = .{ .source = case.source };
+        defer yaml.deinit(testing.allocator);
+        try yaml.load(testing.allocator);
+        try testing.expectEqualStrings(case.expected, yaml.docs.items[0].scalar);
+        var arena = Arena.init(testing.allocator);
+        defer arena.deinit();
+        const parsed = try yaml.parse(arena.allocator(), ?[]const u8);
+        try testing.expect(parsed != null);
+        try testing.expectEqualStrings(case.expected, parsed.?);
+    }
+}
+
+test "null decodes to every optional type and rejects nonoptional destinations" {
+    const Choice = enum { selected };
+    const Record = struct { value: i32 };
+    var yaml: Yaml = .{ .source = "null" };
+    defer yaml.deinit(testing.allocator);
+    try yaml.load(testing.allocator);
+    var arena = Arena.init(testing.allocator);
+    defer arena.deinit();
+
+    inline for (.{ i32, u32, f64, bool, []const u8, Choice, Record, [2]i32, []const i32, *i32, *const Record, ?i32 }) |T| {
+        try testing.expectEqual(@as(?T, null), try yaml.parse(arena.allocator(), ?T));
+        if (@typeInfo(T) != .optional) {
+            try testing.expectError(error.TypeMismatch, yaml.parse(arena.allocator(), T));
+        }
+    }
+    try testing.expectError(error.TypeMismatch, yaml.parse(arena.allocator(), void));
+}
+
+test "non-null optionals retain scalar and compound values" {
+    const Choice = enum { selected };
+    const Record = struct { value: i32 };
+    const Config = struct {
+        signed: ?i32,
+        unsigned: ?u32,
+        float: ?f64,
+        boolean: ?bool,
+        string: ?[]const u8,
+        choice: ?Choice,
+        record: ?Record,
+        array: ?[2]i32,
+        slice: ?[]const i32,
+        pointer: ?*i32,
+        record_pointer: ?*const Record,
+        nested: ??i32,
+    };
+    var yaml: Yaml = .{ .source =
+        \\signed: -7
+        \\unsigned: 7
+        \\float: 1.25
+        \\boolean: false
+        \\string: "null"
+        \\choice: selected
+        \\record:
+        \\  value: 8
+        \\array: [1, 2]
+        \\slice: [3, 4]
+        \\pointer: 9
+        \\record_pointer:
+        \\  value: 10
+        \\nested: 11
+    };
+    defer yaml.deinit(testing.allocator);
+    try yaml.load(testing.allocator);
+    var arena = Arena.init(testing.allocator);
+    defer arena.deinit();
+    const parsed = try yaml.parse(arena.allocator(), Config);
+    try testing.expectEqual(@as(i32, -7), parsed.signed.?);
+    try testing.expectEqual(@as(u32, 7), parsed.unsigned.?);
+    try testing.expectEqual(@as(f64, 1.25), parsed.float.?);
+    try testing.expectEqual(false, parsed.boolean.?);
+    try testing.expectEqualStrings("null", parsed.string.?);
+    try testing.expectEqual(Choice.selected, parsed.choice.?);
+    try testing.expectEqual(@as(i32, 8), parsed.record.?.value);
+    try testing.expectEqualSlices(i32, &.{ 1, 2 }, &parsed.array.?);
+    try testing.expectEqualSlices(i32, &.{ 3, 4 }, parsed.slice.?);
+    try testing.expectEqual(@as(i32, 9), parsed.pointer.?.*);
+    try testing.expectEqual(@as(i32, 10), parsed.record_pointer.?.value);
+    try testing.expectEqual(@as(i32, 11), parsed.nested.?.?);
+}
+
+test "missing fields use defaults but explicit and omitted null values override them" {
+    const Config = struct {
+        missing: ?i32 = 12,
+        explicit: ?i32 = 13,
+        omitted: ?i32 = 14,
+        absent: ?i32,
+        text: ?[]const u8 = "default",
+        required: i32 = 15,
+    };
+    var yaml: Yaml = .{ .source =
+        \\explicit: null
+        \\omitted:
+        \\text: ~
+    };
+    defer yaml.deinit(testing.allocator);
+    try yaml.load(testing.allocator);
+    var arena = Arena.init(testing.allocator);
+    defer arena.deinit();
+    const parsed = try yaml.parse(arena.allocator(), Config);
+    try testing.expectEqual(@as(?i32, 12), parsed.missing);
+    try testing.expect(parsed.explicit == null);
+    try testing.expect(parsed.omitted == null);
+    try testing.expect(parsed.absent == null);
+    try testing.expect(parsed.text == null);
+    try testing.expectEqual(@as(i32, 15), parsed.required);
+
+    var nonoptional: Yaml = .{ .source = "required: null" };
+    defer nonoptional.deinit(testing.allocator);
+    try nonoptional.load(testing.allocator);
+    try testing.expectError(error.TypeMismatch, nonoptional.parse(arena.allocator(), Config));
+}
+
+test "explicit empty documents are null while empty streams have no documents" {
+    for ([_][]const u8{ "", " \n# comment\n" }) |source| {
+        var yaml: Yaml = .{ .source = source };
+        defer yaml.deinit(testing.allocator);
+        try yaml.load(testing.allocator);
+        try testing.expectEqual(@as(usize, 0), yaml.docs.items.len);
+        try testing.expectError(error.TypeMismatch, yaml.parse(testing.allocator, ?i32));
+    }
+    for ([_][]const u8{ "---", "---\n", "---\n# empty\n", "---\n...\n" }) |source| {
+        var yaml: Yaml = .{ .source = source };
+        defer yaml.deinit(testing.allocator);
+        try yaml.load(testing.allocator);
+        try testing.expectEqual(@as(usize, 1), yaml.docs.items.len);
+        try testing.expect(yaml.docs.items[0] == .null);
+        try testing.expectEqual(@as(?i32, null), try yaml.parse(testing.allocator, ?i32));
+    }
+}
+
+test "empty documents and mapping values stop at document boundaries" {
+    var yaml: Yaml = .{ .source =
+        \\---
+        \\---
+        \\value:
+        \\---
+        \\...
+        \\---
+        \\value: 7
+        \\...
+    };
+    defer yaml.deinit(testing.allocator);
+    try yaml.load(testing.allocator);
+    try testing.expectEqual(@as(usize, 4), yaml.docs.items.len);
+    try testing.expect(yaml.docs.items[0] == .null);
+    try testing.expect(yaml.docs.items[1].map.get("value").? == .null);
+    try testing.expect(yaml.docs.items[2] == .null);
+    try testing.expectEqualStrings("7", yaml.docs.items[3].map.get("value").?.scalar);
+
+    var arena = Arena.init(testing.allocator);
+    defer arena.deinit();
+    const parsed = try yaml.parse(arena.allocator(), []const ?struct { value: ?i32 });
+    try testing.expectEqual(@as(usize, 4), parsed.len);
+    try testing.expect(parsed[0] == null);
+    try testing.expect(parsed[1].?.value == null);
+    try testing.expect(parsed[2] == null);
+    try testing.expectEqual(@as(?i32, 7), parsed[3].?.value);
+}
+
+test "empty block items preserve positions across nesting and indentless sequences" {
+    var yaml: Yaml = .{ .source =
+        \\items:
+        \\- # first empty item
+        \\- 2
+        \\-
+        \\nested:
+        \\  -
+        \\  - value:
+        \\    next: 3
+        \\  -
+        \\    - null
+        \\    -
+        \\after:
+    };
+    defer yaml.deinit(testing.allocator);
+    try yaml.load(testing.allocator);
+    const map = yaml.docs.items[0].map;
+    const items = map.get("items").?.list;
+    try testing.expectEqual(@as(usize, 3), items.len);
+    try testing.expect(items[0] == .null);
+    try testing.expectEqualStrings("2", items[1].scalar);
+    try testing.expect(items[2] == .null);
+    const nested = map.get("nested").?.list;
+    try testing.expectEqual(@as(usize, 3), nested.len);
+    try testing.expect(nested[0] == .null);
+    try testing.expect(nested[1].map.get("value").? == .null);
+    try testing.expectEqualStrings("3", nested[1].map.get("next").?.scalar);
+    try testing.expectEqual(@as(usize, 2), nested[2].list.len);
+    for (nested[2].list) |item| try testing.expect(item == .null);
+    try testing.expect(map.get("after").? == .null);
+}
+
+test "empty final block items stop at document markers and end of input" {
+    for ([_][]const u8{ "-", "-\n", "- # empty\n", "---\n-\n...\n" }) |source| {
+        var yaml: Yaml = .{ .source = source };
+        defer yaml.deinit(testing.allocator);
+        try yaml.load(testing.allocator);
+        const list = yaml.docs.items[0].list;
+        try testing.expectEqual(@as(usize, 1), list.len);
+        try testing.expect(list[0] == .null);
+    }
+    var yaml: Yaml = .{ .source = "---\n-\n---\n- 4\n" };
+    defer yaml.deinit(testing.allocator);
+    try yaml.load(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), yaml.docs.items.len);
+    try testing.expectEqual(@as(usize, 1), yaml.docs.items[0].list.len);
+    try testing.expect(yaml.docs.items[0].list[0] == .null);
+    try testing.expectEqualStrings("4", yaml.docs.items[1].list[0].scalar);
+}
+
+test "mixed null list positions survive typed arrays slices and serialization" {
+    const expected = [_]?i32{ null, 1, null, -2, null };
+    for ([_][]const u8{ "[null, 1, ~, -2, NULL]", "-\n- 1\n- Null\n- -2\n-" }) |source| {
+        var yaml: Yaml = .{ .source = source };
+        defer yaml.deinit(testing.allocator);
+        try yaml.load(testing.allocator);
+        var arena = Arena.init(testing.allocator);
+        defer arena.deinit();
+        const array = try yaml.parse(arena.allocator(), [5]?i32);
+        try testing.expectEqualSlices(?i32, &expected, &array);
+        const slice = try yaml.parse(arena.allocator(), []const ?i32);
+        try testing.expectEqualSlices(?i32, &expected, slice);
+        try testing.expectError(error.TypeMismatch, yaml.parse(arena.allocator(), []const i32));
+        try testing.expectError(error.TypeMismatch, yaml.parse(arena.allocator(), [5]i32));
+    }
+    try testStringify("[ null, 1, null, -2, null ]", expected);
+    try testStringify("[ null, 1, null, -2, null ]", @as([]const ?i32, &expected));
+}
+
+test "encode preserves null roots fields and tuple array slice positions" {
+    var arena = Arena.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    try testing.expect(try Yaml.Value.encode(allocator, null) == .null);
+    try testing.expect(try Yaml.Value.encode(allocator, @as(?i32, null)) == .null);
+    const nested_null: ?i32 = null;
+    const present_null: ??i32 = nested_null;
+    try testing.expect(present_null != null);
+    try testing.expect(try Yaml.Value.encode(allocator, present_null) == .null);
+    try testStringify("null", present_null);
+
+    const array = [_]?i32{ null, 2, null };
+    inline for (.{ .{ null, @as(?i32, 2), @as(?i32, null) }, array, @as([]const ?i32, &array) }) |input| {
+        const encoded = try Yaml.Value.encode(allocator, input);
+        try testing.expectEqual(@as(usize, 3), encoded.list.len);
+        try testing.expect(encoded.list[0] == .null);
+        try testing.expectEqualStrings("2", encoded.list[1].scalar);
+        try testing.expect(encoded.list[2] == .null);
+    }
+    const encoded = try Yaml.Value.encode(allocator, struct { a: ?i32, b: ?i32 }{ .a = null, .b = 3 });
+    try testing.expectEqual(@as(usize, 2), encoded.map.count());
+    try testing.expect(encoded.map.get("a").? == .null);
+    try testing.expectEqualStrings("3", encoded.map.get("b").?.scalar);
+    try testStringify("[ null, 2, null ]", .{ null, @as(?i32, 2), @as(?i32, null) });
+}
+
+test "raw serializer roundtrip preserves nulls and null-looking strings" {
+    var yaml: Yaml = .{ .source =
+        \\actual: null
+        \\omitted:
+        \\strings: ["null", 'Null', "NULL", '~', "", nUlL]
+        \\mixed: [null, "null", "", ~]
+    };
+    defer yaml.deinit(testing.allocator);
+    try yaml.load(testing.allocator);
+    var writer: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer writer.deinit();
+    try yaml.stringify(&writer.writer);
+    var reloaded: Yaml = .{ .source = writer.written() };
+    defer reloaded.deinit(testing.allocator);
+    try reloaded.load(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), reloaded.docs.items.len);
+    const map = reloaded.docs.items[0].map;
+    try testing.expect(map.get("actual").? == .null);
+    try testing.expect(map.get("omitted").? == .null);
+    const strings = map.get("strings").?.list;
+    const expected = [_][]const u8{ "null", "Null", "NULL", "~", "", "nUlL" };
+    try testing.expectEqual(expected.len, strings.len);
+    for (expected, strings) |text, value| try testing.expectEqualStrings(text, value.scalar);
+    const mixed = map.get("mixed").?.list;
+    try testing.expectEqual(@as(usize, 4), mixed.len);
+    try testing.expect(mixed[0] == .null);
+    try testing.expectEqualStrings("null", mixed[1].scalar);
+    try testing.expectEqualStrings("", mixed[2].scalar);
+    try testing.expect(mixed[3] == .null);
+}
+
+test "typed serializer roundtrip preserves explicit null overriding defaults and strings" {
+    const Config = struct {
+        absent: ?i32 = 99,
+        strings: []const ?[]const u8,
+    };
+    const input: Config = .{
+        .absent = null,
+        .strings = &.{ null, "null", "Null", "NULL", "~", "", "nUlL", null },
+    };
+    var writer: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer writer.deinit();
+    try stringify(testing.allocator, input, &writer.writer);
+    var yaml: Yaml = .{ .source = writer.written() };
+    defer yaml.deinit(testing.allocator);
+    try yaml.load(testing.allocator);
+    var arena = Arena.init(testing.allocator);
+    defer arena.deinit();
+    const parsed = try yaml.parse(arena.allocator(), Config);
+    try testing.expect(parsed.absent == null);
+    try testing.expectEqual(input.strings.len, parsed.strings.len);
+    for (input.strings, parsed.strings) |expected, actual| {
+        if (expected) |text| {
+            try testing.expect(actual != null);
+            try testing.expectEqualStrings(text, actual.?);
+        } else {
+            try testing.expect(actual == null);
+        }
+    }
+}
+
+test "stringify non-null optional scalar and compound values" {
+    const Choice = enum { selected };
+    const Record = struct { value: ?i32 };
+    const integer: i32 = -7;
+    const record: Record = .{ .value = null };
+    try testStringify("-7", @as(?i32, integer));
+    try testStringify("7", @as(?u32, 7));
+    try testStringify("1.25", @as(?f64, 1.25));
+    try testStringify("false", @as(?bool, false));
+    try testStringify("text", @as(?[]const u8, "text"));
+    try testStringify("selected", @as(?Choice, .selected));
+    try testStringify("value: null", @as(?Record, record));
+    try testStringify("[ 1, 2 ]", @as(?[2]i32, .{ 1, 2 }));
+    try testStringify("[ 3, 4 ]", @as(?[]const i32, &.{ 3, 4 }));
+    try testStringify("-7", @as(?*const i32, &integer));
+    try testStringify("value: null", @as(?*const Record, &record));
+    try testStringify("11", @as(??i32, @as(?i32, 11)));
+}
+
+test "serializer roundtrip preserves compound list values between nulls" {
+    const Record = struct { value: ?i32 };
+    const Config = struct {
+        records: []const ?Record,
+        lists: []const ?[]const ?i32,
+    };
+    const input: Config = .{
+        .records = &.{ null, .{ .value = 1 }, null, .{ .value = null }, null },
+        .lists = &.{ null, &.{ null, 2 }, null, &.{ 3, null }, null },
+    };
+    var writer: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer writer.deinit();
+    try stringify(testing.allocator, input, &writer.writer);
+    var yaml: Yaml = .{ .source = writer.written() };
+    defer yaml.deinit(testing.allocator);
+    try yaml.load(testing.allocator);
+    var arena = Arena.init(testing.allocator);
+    defer arena.deinit();
+    const parsed = try yaml.parse(arena.allocator(), Config);
+    try testing.expectEqual(input.records.len, parsed.records.len);
+    for (input.records, parsed.records) |expected, actual| {
+        if (expected) |record| {
+            try testing.expect(actual != null);
+            try testing.expectEqual(record.value, actual.?.value);
+        } else {
+            try testing.expect(actual == null);
+        }
+    }
+    try testing.expectEqual(input.lists.len, parsed.lists.len);
+    for (input.lists, parsed.lists) |expected, actual| {
+        if (expected) |list| {
+            try testing.expect(actual != null);
+            try testing.expectEqualSlices(?i32, list, actual.?);
+        } else {
+            try testing.expect(actual == null);
+        }
+    }
+}
+
+test "null and empty-string root documents survive raw and typed serialization" {
+    for ([_]?[]const u8{ null, "", "null", "Null", "NULL", "~" }) |input| {
+        var writer: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer writer.deinit();
+        try stringify(testing.allocator, input, &writer.writer);
+        var yaml: Yaml = .{ .source = writer.written() };
+        defer yaml.deinit(testing.allocator);
+        try yaml.load(testing.allocator);
+        var raw_writer: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer raw_writer.deinit();
+        try yaml.stringify(&raw_writer.writer);
+        var reloaded: Yaml = .{ .source = raw_writer.written() };
+        defer reloaded.deinit(testing.allocator);
+        try reloaded.load(testing.allocator);
+        var arena = Arena.init(testing.allocator);
+        defer arena.deinit();
+        const parsed = try reloaded.parse(arena.allocator(), ?[]const u8);
+        if (input) |text| {
+            try testing.expect(parsed != null);
+            try testing.expectEqualStrings(text, parsed.?);
+        } else {
+            try testing.expect(parsed == null);
+        }
+    }
 }

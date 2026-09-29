@@ -785,15 +785,10 @@ test "map value indicator needs to be on the same line" {
 }
 
 test "value needs to be indented" {
-    try parseError2(
+    try parseError(
         \\a:
         \\b
-    ,
-        \\(memory):2:1: error: 'value' in map should have more indentation than the 'key'
-        \\b
-        \\^
-        \\
-    , .{});
+    , error.ParseFailure);
 }
 
 test "comment between a key and a value is fine" {
@@ -913,4 +908,171 @@ test "expect map separator" {
         \\~~~~^
         \\
     , .{});
+}
+
+test "omitted block sequence entries retain positions and nesting" {
+    const source =
+        \\items:
+        \\  - # omitted before a sibling
+        \\  - first
+        \\  -
+        \\    - # omitted in a nested sequence
+        \\    - nested
+        \\    -
+        \\  - # omitted before a dedented key
+        \\after: last
+    ;
+    var parser = try Parser.init(testing.allocator, source);
+    defer parser.deinit(testing.allocator);
+    try parser.parse(testing.allocator);
+    var tree = try parser.toOwnedTree(testing.allocator);
+    defer tree.deinit(testing.allocator);
+
+    try testing.expectEqual(1, tree.docs.len);
+    const root = tree.nodeData(tree.docs[0]).maybe_node.unwrap().?;
+    const map = tree.extraData(Map, tree.nodeData(root).extra);
+    try testing.expectEqual(2, map.data.map_len);
+    const items = tree.extraData(Map.Entry, map.end);
+    const list = tree.extraData(List, tree.nodeData(items.data.maybe_node.unwrap().?).extra);
+    try testing.expectEqual(4, list.data.list_len);
+    var entry = tree.extraData(List.Entry, list.end);
+    try testing.expectEqual(.empty_scalar, tree.nodeTag(entry.data.node));
+    entry = tree.extraData(List.Entry, entry.end);
+    try expectValueListEntry(tree, entry.data, "first");
+    entry = tree.extraData(List.Entry, entry.end);
+    const nested = tree.extraData(List, tree.nodeData(entry.data.node).extra);
+    try testing.expectEqual(3, nested.data.list_len);
+    var child = tree.extraData(List.Entry, nested.end);
+    try testing.expectEqual(.empty_scalar, tree.nodeTag(child.data.node));
+    child = tree.extraData(List.Entry, child.end);
+    try expectValueListEntry(tree, child.data, "nested");
+    child = tree.extraData(List.Entry, child.end);
+    try testing.expectEqual(.empty_scalar, tree.nodeTag(child.data.node));
+    entry = tree.extraData(List.Entry, entry.end);
+    try testing.expectEqual(.empty_scalar, tree.nodeTag(entry.data.node));
+    const after = tree.extraData(Map.Entry, items.end);
+    try expectValueMapEntry(tree, after.data, "after", "last");
+}
+
+test "omitted mapping values preserve siblings and indentless sequences" {
+    const source =
+        \\empty: # omitted before a sibling
+        \\
+        \\nested:
+        \\  first:
+        \\  second: value
+        \\  last: # omitted before dedenting
+        \\sequence:
+        \\- # indentless empty entry
+        \\- item
+        \\-
+        \\tail:
+    ;
+    var parser = try Parser.init(testing.allocator, source);
+    defer parser.deinit(testing.allocator);
+    try parser.parse(testing.allocator);
+    var tree = try parser.toOwnedTree(testing.allocator);
+    defer tree.deinit(testing.allocator);
+
+    const root = tree.nodeData(tree.docs[0]).maybe_node.unwrap().?;
+    const map = tree.extraData(Map, tree.nodeData(root).extra);
+    try testing.expectEqual(4, map.data.map_len);
+    var entry = tree.extraData(Map.Entry, map.end);
+    try testing.expectEqualStrings("empty", tree.rawString(entry.data.key, entry.data.key));
+    try testing.expectEqual(.none, entry.data.maybe_node);
+    entry = tree.extraData(Map.Entry, entry.end);
+    const nested = tree.extraData(Map, tree.nodeData(entry.data.maybe_node.unwrap().?).extra);
+    try testing.expectEqual(3, nested.data.map_len);
+    var child = tree.extraData(Map.Entry, nested.end);
+    try testing.expectEqualStrings("first", tree.rawString(child.data.key, child.data.key));
+    try testing.expectEqual(.none, child.data.maybe_node);
+    child = tree.extraData(Map.Entry, child.end);
+    try expectValueMapEntry(tree, child.data, "second", "value");
+    child = tree.extraData(Map.Entry, child.end);
+    try testing.expectEqualStrings("last", tree.rawString(child.data.key, child.data.key));
+    try testing.expectEqual(.none, child.data.maybe_node);
+    entry = tree.extraData(Map.Entry, entry.end);
+    const list = tree.extraData(List, tree.nodeData(entry.data.maybe_node.unwrap().?).extra);
+    try testing.expectEqual(3, list.data.list_len);
+    var item = tree.extraData(List.Entry, list.end);
+    try testing.expectEqual(.empty_scalar, tree.nodeTag(item.data.node));
+    item = tree.extraData(List.Entry, item.end);
+    try expectValueListEntry(tree, item.data, "item");
+    item = tree.extraData(List.Entry, item.end);
+    try testing.expectEqual(.empty_scalar, tree.nodeTag(item.data.node));
+    entry = tree.extraData(Map.Entry, entry.end);
+    try testing.expectEqualStrings("tail", tree.rawString(entry.data.key, entry.data.key));
+    try testing.expectEqual(.none, entry.data.maybe_node);
+}
+
+test "omitted values in compact mapping sequence entries" {
+    const source =
+        \\- empty:
+        \\- nested:
+        \\    child:
+        \\  sibling: value
+        \\-
+    ;
+    var parser = try Parser.init(testing.allocator, source);
+    defer parser.deinit(testing.allocator);
+    try parser.parse(testing.allocator);
+    var tree = try parser.toOwnedTree(testing.allocator);
+    defer tree.deinit(testing.allocator);
+
+    const root = tree.nodeData(tree.docs[0]).maybe_node.unwrap().?;
+    const list = tree.extraData(List, tree.nodeData(root).extra);
+    try testing.expectEqual(3, list.data.list_len);
+    var entry = tree.extraData(List.Entry, list.end);
+    const first = tree.nodeData(entry.data.node).map;
+    try testing.expectEqualStrings("empty", tree.rawString(first.key, first.key));
+    try testing.expectEqual(.none, first.maybe_node);
+    entry = tree.extraData(List.Entry, entry.end);
+    const map = tree.extraData(Map, tree.nodeData(entry.data.node).extra);
+    try testing.expectEqual(2, map.data.map_len);
+    var child = tree.extraData(Map.Entry, map.end);
+    const nested = tree.nodeData(child.data.maybe_node.unwrap().?).map;
+    try testing.expectEqualStrings("child", tree.rawString(nested.key, nested.key));
+    try testing.expectEqual(.none, nested.maybe_node);
+    child = tree.extraData(Map.Entry, child.end);
+    try expectValueMapEntry(tree, child.data, "sibling", "value");
+    entry = tree.extraData(List.Entry, entry.end);
+    try testing.expectEqual(.empty_scalar, tree.nodeTag(entry.data.node));
+}
+
+test "omitted block values stop at EOF and document boundaries" {
+    const cases = .{
+        .{ "-", Node.Tag.list_one, @as(usize, 1) },
+        .{ "-\r\n", Node.Tag.list_one, @as(usize, 1) },
+        .{ "key:", Node.Tag.map_single, @as(usize, 1) },
+        .{ "key:\r\n", Node.Tag.map_single, @as(usize, 1) },
+        .{ "---\n- # empty\n---\n---\nvalue", Node.Tag.list_one, @as(usize, 3) },
+        .{ "---\nkey: # empty\n...\n---\n---\nvalue", Node.Tag.map_single, @as(usize, 3) },
+    };
+    inline for (cases) |case| {
+        var parser = try Parser.init(testing.allocator, case[0]);
+        defer parser.deinit(testing.allocator);
+        try parser.parse(testing.allocator);
+        var tree = try parser.toOwnedTree(testing.allocator);
+        defer tree.deinit(testing.allocator);
+
+        try testing.expectEqual(case[2], tree.docs.len);
+        const root = tree.nodeData(tree.docs[0]).maybe_node.unwrap().?;
+        try testing.expectEqual(case[1], tree.nodeTag(root));
+        if (case[1] == .list_one) {
+            try testing.expectEqual(.empty_scalar, tree.nodeTag(tree.nodeData(root).node));
+        } else {
+            try testing.expectEqual(.none, tree.nodeData(root).map.maybe_node);
+        }
+        if (case[2] == 3) {
+            try testing.expectEqual(.none, tree.nodeData(tree.docs[1]).maybe_node);
+            const last = tree.nodeData(tree.docs[2]).maybe_node.unwrap().?;
+            try testing.expectEqualStrings("value", tree.nodeScope(last).rawString(tree));
+        }
+    }
+}
+
+test "empty slots in flow sequences remain invalid" {
+    inline for (.{ "[ , ]", "[ , value ]", "[ first, , last ]" }) |source| {
+        try parseError(source, error.ParseFailure);
+    }
 }

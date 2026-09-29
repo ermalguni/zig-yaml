@@ -91,6 +91,61 @@ pub fn parse(self: *Parser, gpa: Allocator) ParseError!void {
     }
 }
 
+/// Parse a block entry's value without consuming the next sibling or
+/// document boundary. Mapping values may use an indentless sequence.
+fn blockValue(
+    self: *Parser,
+    gpa: Allocator,
+    parent: Token.Index,
+    is_mapping: bool,
+) ParseError!Node.OptionalIndex {
+    self.eatCommentsAndSpace(&.{});
+
+    const next_pos = self.token_it.pos;
+    const next = self.token_it.peek() orelse return .none;
+
+    switch (next.id) {
+        .doc_start, .doc_end, .eof => return .none,
+        else => {},
+    }
+
+    if (self.getLine(next_pos) > self.getLine(parent)) {
+        const parent_col = self.getCol(parent);
+        const next_col = self.getCol(next_pos);
+
+        const is_indentless_sequence =
+            is_mapping and
+            next.id == .seq_item_ind and
+            next_col == parent_col;
+
+        if (next_col <= parent_col and !is_indentless_sequence) {
+            return .none;
+        }
+    }
+
+    const result = try self.value(gpa);
+    // Mapping parsing also handles its existing flow-map delimiters.
+    if (result == .none and !is_mapping) return error.MalformedYaml;
+    return result;
+}
+
+fn addEmptyScalar(
+    self: *Parser,
+    gpa: Allocator,
+    pos: Token.Index,
+) Allocator.Error!Node.Index {
+    const index = try self.nodes.addOne(gpa);
+    self.nodes.set(index, .{
+        .tag = .empty_scalar,
+        .scope = .{
+            .start = pos,
+            .end = pos,
+        },
+        .data = undefined,
+    });
+    return @enumFromInt(index);
+}
+
 pub fn toOwnedTree(self: *Parser, gpa: Allocator) Allocator.Error!Tree {
     return .{
         .source = self.source,
@@ -294,21 +349,7 @@ fn map(self: *Parser, gpa: Allocator) ParseError!Node.OptionalIndex {
             return error.UnsupportedMergeKey;
 
         // Parse value
-        self.eatCommentsAndSpace(&.{});
-        const next_pos = self.token_it.pos;
-        const next = self.token_it.peek() orelse return error.UnexpectedEof;
-        const key_loc = self.tokens.items(.line_col)[@intFromEnum(key_pos)];
-        const next_loc = self.tokens.items(.line_col)[@intFromEnum(next_pos)];
-
-        const boundary = next.id == .eof or
-            next.id == .doc_start or
-            next.id == .doc_end or
-            (next_loc.line > key_loc.line and
-                (next_loc.col < key_loc.col or
-                    (next_loc.col == key_loc.col and next.id != .seq_item_ind)));
-
-        const value_index: Node.OptionalIndex =
-            if (boundary) .none else try self.value(gpa);
+        const value_index = try self.blockValue(gpa, key_pos, true);
         if (value_index.unwrap()) |v| {
             const value_start = self.nodes.items(.scope)[@intFromEnum(v)].start;
             if (self.getCol(value_start) < self.getCol(key_pos)) {
@@ -396,10 +437,11 @@ fn list(self: *Parser, gpa: Allocator) ParseError!Node.OptionalIndex {
         //  an inner list will be parsed by self.value() so
         //  checking for  cur_col > first_col is not necessary here
 
-        const value_index = try self.value(gpa);
-        if (value_index == .none) return error.MalformedYaml;
+        const value_index = try self.blockValue(gpa, pos, false);
+        const node = value_index.unwrap() orelse
+            try self.addEmptyScalar(gpa, pos);
 
-        try values.append(gpa, .{ .node = value_index.unwrap().? });
+        try values.append(gpa, .{ .node = node });
     }
 
     const node_end: Token.Index = @enumFromInt(@intFromEnum(self.token_it.pos) - 1);
@@ -431,7 +473,9 @@ fn listBracketed(self: *Parser, gpa: Allocator) ParseError!Node.OptionalIndex {
         if (self.eatToken(.flow_seq_end, &.{.comment})) |pos|
             break pos;
 
-        _ = self.eatToken(.comma, &.{.comment});
+        if (values.items.len != 0) {
+            _ = self.eatToken(.comma, &.{.comment});
+        }
 
         if (self.eatToken(.flow_seq_end, &.{.comment})) |pos|
             break pos;

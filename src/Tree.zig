@@ -128,6 +128,10 @@ pub const Node = struct {
         /// String that required preprocessing such as a quoted string.
         /// Payload is string.
         string_value,
+
+        /// An omitted block scalar.
+        /// Payload is unused.
+        empty_scalar,
     };
 
     /// Describes the Token range that encapsulates this Node.

@@ -5,7 +5,7 @@ const Yaml = @import("yaml").Yaml;
 
 const mem = std.mem;
 
-var gpa_alloc = std.heap.GeneralPurposeAllocator(.{}){};
+var gpa_alloc = std.heap.DebugAllocator(.{}){};
 const gpa = gpa_alloc.allocator();
 
 const usage =
@@ -120,4 +120,5 @@ pub fn main(init: std.process.Init.Minimal) !void {
     };
 
     try yaml.stringify(&stdout.interface);
+    try stdout.interface.flush();
 }
